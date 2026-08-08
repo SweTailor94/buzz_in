@@ -1,0 +1,4 @@
+[toolchain]
+targets = ["thumbv6m-none-eabi"]
+channel="nightly"
+
