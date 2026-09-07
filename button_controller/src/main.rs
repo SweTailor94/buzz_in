@@ -10,9 +10,11 @@ use embassy_net::tcp::TcpSocket;
 use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::USB;
+use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{Peri, bind_interrupts, peripherals};
+use embassy_rp::pio::Pio;
+use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program, RgbwPioWs2812};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 // use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
@@ -25,9 +27,12 @@ use heapless::Vec;
 use messages::{ButtonState, Command};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+use smart_leds::RGB8;
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
+     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
+     DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
 });
 
 type MyDriver = Driver<'static, peripherals::USB>;
@@ -315,6 +320,15 @@ async fn main(spawner: Spawner) {
     // Create the driver, from the HAL.
     let driver = Driver::new(p.USB, Irqs);
 
+    // set up Neopixel
+    let mut pio = Pio::new(p.PIO0, Irqs);
+    let program = PioWs2812Program::new(&mut pio.common);
+    let mut  ws2812 = PioWs2812::new(&mut pio.common, pio.sm0, p.DMA_CH0, Irqs,  p.PIN_16, &program);
+
+    let mut ws2812_buffer = [RGB8::new(128,0,0),RGB8::new(0, 128, 0), RGB8::new(0, 0, 128), RGB8::new(128,128,0), RGB8::new(128,128,128)];
+
+    ws2812.write(&ws2812_buffer).await;
+
     // Create embassy-usb Config
     let mut config = Config::new(0xc0de, 0xcafe);
     config.manufacturer = Some("Tailor94");
@@ -412,7 +426,7 @@ async fn main(spawner: Spawner) {
                         info!("Received command: {}", command.as_str());
                         match command {
                             Command::Reset => {
-                                RESET_SIGNAL.signal(());
+                                RESET_SIGNAL.signal(Command::Reset);
                             }
                             Command::TimingIdle => {
                                 // set up for fastest reaction:
@@ -428,7 +442,15 @@ async fn main(spawner: Spawner) {
                         break;
                     }
                     Either::Second(button_state) => {
-                        send_button_state = Some(button_state);
+                        match button_state {
+                            Command::Buttons(button_state) => {
+                                send_button_state = Some(button_state);
+                            }
+                            Command::Reset => {}
+                            Command::TimingIdle => {}
+                            Command::TimingStart => {}
+                            Command::TimingResult(_, _) => {}
+                        }
                         STATE_REPORT.reset();
                     }
                 }
