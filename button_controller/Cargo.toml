@@ -1,5 +1,5 @@
 [package]
-name = "button_controller"
+name = "button-controller"
 version = "0.1.0"
 edition = "2024"
 

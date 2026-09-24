@@ -7,16 +7,13 @@ use postcard2::{from_bytes, BufferFull, DeserializerError, SerializerError, Unex
 use postcard2::to_slice;
 use heapless::Vec;
 
-#[derive(Serialize,Deserialize,Debug)]
+#[derive(Serialize,Deserialize,Debug, Clone)]
 pub enum Command {
-    Buttons(ButtonState),
+    Buttons(
+        [ButtonState; 5]),
     Reset,
-    TimingIdle,
-    TimingStart,
-    TimingResult(
-        ButtonState, // Button pressed
-        u64, // milliseconds
-    )
+    None,
+    PollButtonState,
 }
 
 impl Command {
@@ -24,21 +21,32 @@ impl Command {
          match self {
              Command::Buttons(_) => "Buttons",
              Command::Reset => "Reset",
-             Command::TimingIdle => "TimingIdle",
-             Command::TimingStart => "TimingStart",
-             Command::TimingResult(_, _) => "TimingResult",
+             Command::None => "None",
+             Command::PollButtonState => "PollButtonState",
          }
      }
 }
 
-#[derive(Serialize,Deserialize,Debug)]
+#[derive(Serialize,Deserialize,Debug, Clone, Copy)]
 pub enum ButtonState{
-    Ready,
     Red,
     Green,
     Blue,
     Yellow,
     White,
+    None,
+}
+
+impl Default for ButtonState {
+    fn default() -> Self {
+        ButtonState::None
+    }
+}
+
+impl Default for Command {
+    fn default() -> Self {
+        Command::None
+    }
 }
 
 impl Command {
