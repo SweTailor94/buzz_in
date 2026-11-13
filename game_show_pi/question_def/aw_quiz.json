@@ -1,0 +1,31 @@
+{
+  "Name" : "AW November 7",
+  "questions": [
+    {
+      "image": "image1.png",
+      "shall_zoom": true,
+      "text": "Who is this?",
+      "answer": "Some guy"
+    },
+    {
+      "image": "image2.png",
+      "shall_zoom": true,
+      "text": "Where is this?",
+      "answer": "Here!"
+    },
+    {
+      "text": "Who is the artist? What is the name of the song?",
+      "answer": "Frank Sinatra, My Way"
+    },
+    {
+      "text": "What song is playing?",
+      "question_sound": "song1.mp3",
+      "answer": "Tubthumping"
+    },
+    {
+      "text": "What sound will play if you get this question right?",
+      "correct_sound": "ode_to_joy.wav",
+      "answer": "Ode to joy!"
+    }
+  ]
+}

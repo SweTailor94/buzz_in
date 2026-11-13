@@ -1,24 +1,28 @@
 #![no_std]
 #![no_main]
 
+mod buttons_and_leds;
+
 use assign_resources::assign_resources;
 use core::fmt::Display;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_futures::select::{Either, Either5, Either6, Select};
+use embassy_futures::select::Either;
 use embassy_net::tcp::TcpSocket;
 use embassy_net::{Ipv4Address, Ipv4Cidr, StackResources};
 use embassy_rp::clocks::RoscRng;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::USB;
+use embassy_rp::peripherals::{DMA_CH0, PIO0, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{Peri, bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 // use embassy_sync::channel::Channel;
+use buttons_and_leds::{ButtonEvent, buttons_task, leds_task};
 use embassy_sync::signal::Signal;
-use embassy_time::Instant;
 use embassy_usb::class::cdc_ncm::embassy_net::{Device, Runner, State as NetState};
 use embassy_usb::class::cdc_ncm::{CdcNcmClass, State};
+use embassy_usb::driver::Event;
 use embassy_usb::{Builder, Config, UsbDevice};
 use embedded_io_async::{Error, ErrorKind, Write};
 use heapless::Vec;
@@ -28,6 +32,8 @@ use {defmt_rtt as _, panic_probe as _};
 
 bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
+     PIO0_IRQ_0 => embassy_rp::pio::InterruptHandler<PIO0>;
+     DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<DMA_CH0>;
 });
 
 type MyDriver = Driver<'static, peripherals::USB>;
@@ -50,260 +56,28 @@ async fn net_task(mut runner: embassy_net::Runner<'static, Device<'static, MTU>>
 }
 
 static STATE_REPORT: Signal<CriticalSectionRawMutex, Command> = Signal::new();
-static RESET_SIGNAL: Signal<CriticalSectionRawMutex, Command> = Signal::new();
+static BUTTON_EVENTS: Channel<CriticalSectionRawMutex, ButtonEvent,6> = Channel::new();
+static BUTTON_STATE_STRINGS: [&str; 6] = ["Red", "Green", "Blue", "Yellow", "White", "None"];
+
 
 assign_resources! {
-    buttons_and_leds: ButtonsAndLeds{
-        red_button: PIN_2,
+    leds: Leds{
         red_led: PIN_10,
-        green_button: PIN_3,
         green_led: PIN_11,
-        blue_button: PIN_4,
         blue_led: PIN_12,
-        yellow_button: PIN_5,
         yellow_led: PIN_13,
-        white_button: PIN_6,
         white_led: PIN_14,
+        ws2812_pin: PIN_16,
+        ws2812_pio: PIO0,
+        ws2812_dma: DMA_CH0,
+    },
+    buttons: Buttons{
+        red_button: PIN_2,
+        green_button: PIN_3,
+        blue_button: PIN_4,
+        yellow_button: PIN_5,
+        white_button: PIN_6,
         reset_button: PIN_7,
-    }
-}
-
-#[derive(Eq, PartialEq)]
-enum ButtoTaskOperation {
-    Normal,
-    Timing,
-}
-
-#[embassy_executor::task]
-async fn button_and_leds_task(peri: ButtonsAndLeds) -> ! {
-    let mut red_button = Input::new(peri.red_button, Pull::Up);
-    let mut led_red = Output::new(peri.red_led, Level::High);
-    let mut green_button = Input::new(peri.green_button, Pull::Up);
-    let mut led_green = Output::new(peri.green_led, Level::High);
-    let mut blue_button = Input::new(peri.blue_button, Pull::Up);
-    let mut led_blue = Output::new(peri.blue_led, Level::High);
-    let mut yellow_button = Input::new(peri.yellow_button, Pull::Up);
-    let mut led_yellow = Output::new(peri.yellow_led, Level::High);
-    let mut white_button = Input::new(peri.white_button, Pull::Up);
-    let mut led_white = Output::new(peri.white_led, Level::High);
-    let mut reset_button = Input::new(peri.reset_button, Pull::Up);
-    let mut start_time = Instant::now();
-    let mut operation = ButtoTaskOperation::Normal;
-
-    loop {
-        let hit = embassy_futures::select::select6(
-            red_button.wait_for_falling_edge(),
-            green_button.wait_for_falling_edge(),
-            blue_button.wait_for_falling_edge(),
-            yellow_button.wait_for_falling_edge(),
-            white_button.wait_for_falling_edge(),
-            RESET_SIGNAL.wait(),
-        )
-        .await;
-        let ms = start_time.elapsed().as_millis();
-        match hit {
-            Either6::First(_) => {
-                // Red
-                info!("Hit RED");
-                led_green.set_low();
-                led_blue.set_low();
-                led_yellow.set_low();
-                led_white.set_low();
-                if operation == ButtoTaskOperation::Normal {
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::Red));
-                } else {
-                    STATE_REPORT.signal(Command::TimingResult(ButtonState::Red, ms));
-                }
-            }
-            Either6::Second(_) => {
-                // Green
-                info!("Hit GREEN");
-                led_red.set_low();
-                led_blue.set_low();
-                led_yellow.set_low();
-                led_white.set_low();
-                if operation == ButtoTaskOperation::Normal {
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::Green));
-                } else {
-                    STATE_REPORT.signal(Command::TimingResult(ButtonState::Green, ms));
-                }
-            }
-            Either6::Third(_) => {
-                // Blue
-                info!("Hit BLUE");
-                led_red.set_low();
-                led_green.set_low();
-                led_yellow.set_low();
-                led_white.set_low();
-                if operation == ButtoTaskOperation::Normal {
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::Blue));
-                } else {
-                    STATE_REPORT.signal(Command::TimingResult(ButtonState::Blue, ms));
-                }
-            }
-            Either6::Fourth(_) => {
-                // Yellow
-                info!("Hit YELLOW");
-                led_red.set_low();
-                led_green.set_low();
-                led_blue.set_low();
-                led_white.set_low();
-                if operation == ButtoTaskOperation::Normal {
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::Yellow));
-                } else {
-                    STATE_REPORT.signal(Command::TimingResult(ButtonState::Yellow, ms));
-                }
-            }
-            Either6::Fifth(_) => {
-                // White
-                info!("Hit WHITE");
-                led_red.set_low();
-                led_green.set_low();
-                led_blue.set_low();
-                led_yellow.set_low();
-                if operation == ButtoTaskOperation::Normal {
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::White));
-                } else {
-                    STATE_REPORT.signal(Command::TimingResult(ButtonState::White, ms));
-                }
-            }
-            Either6::Sixth(v) => {
-                match v {
-                    Command::Reset => {
-                        continue;
-                    }
-                    Command::TimingIdle => {
-                        info!("TimingIdle");
-                        operation = ButtoTaskOperation::Timing;
-                        // all off
-                        led_red.set_low();
-                        led_green.set_low();
-                        led_blue.set_low();
-                        led_yellow.set_low();
-                        led_white.set_low();
-                    }
-                    Command::TimingStart => {
-                        if operation == ButtoTaskOperation::Timing {
-                            led_red.set_high();
-                            led_green.set_high();
-                            led_blue.set_high();
-                            led_yellow.set_high();
-                            led_white.set_high();
-                            start_time = Instant::now();
-                        }
-                        continue;
-                    }
-                    _ => {
-                        continue;
-                    }
-                }
-            }
-        }
-        info!("Time {} ms", ms);
-        loop {
-            match operation {
-                ButtoTaskOperation::Normal => {
-                    let reset = embassy_futures::select::select(
-                        reset_button.wait_for_falling_edge(),
-                        RESET_SIGNAL.wait(),
-                    )
-                    .await;
-                    match reset {
-                        Either::First(_) => {
-                            info!("Reset Button");
-                        }
-                        Either::Second(v) => {
-                            match v {
-                                Command::Reset => {
-                                }
-                                Command::TimingIdle => {
-                                    info!("TimingIdle");
-                                    operation = ButtoTaskOperation::Timing;
-                                    // all off
-                                    led_red.set_low();
-                                    led_green.set_low();
-                                    led_blue.set_low();
-                                    led_yellow.set_low();
-                                    led_white.set_low();
-                                    continue;
-                                }
-                                Command::TimingStart => {
-                                    continue;
-                                }
-                                _ => {
-                                    continue;
-                                }
-                            }
-                        }
-                    }
-                    STATE_REPORT.signal(Command::Buttons(ButtonState::Ready));
-
-                    led_red.set_high();
-                    led_green.set_high();
-                    led_blue.set_high();
-                    led_yellow.set_high();
-                    led_white.set_high();
-                    start_time = Instant::now();
-                }
-
-                ButtoTaskOperation::Timing => {
-                    let reset = embassy_futures::select::select(
-                        reset_button.wait_for_falling_edge(),
-                        RESET_SIGNAL.wait(),
-                    )
-                    .await;
-                    match reset {
-                        Either::First(_) => {
-                            info!("Reset Button back to normal");
-                            operation = ButtoTaskOperation::Normal;
-                            led_red.set_high();
-                            led_green.set_high();
-                            led_blue.set_high();
-                            led_yellow.set_high();
-                            led_white.set_high();
-                            break;
-                        }
-                        Either::Second(v) => {
-                            match v {
-                                Command::Reset => {
-                                    // back to normal
-                                    operation = ButtoTaskOperation::Normal;
-                                    led_red.set_high();
-                                    led_green.set_high();
-                                    led_blue.set_high();
-                                    led_yellow.set_high();
-                                    led_white.set_high();
-                                    break
-                                }
-                                Command::TimingIdle => {
-                                    info!("TimingIdle");
-                                    operation = ButtoTaskOperation::Timing;
-                                    // all off
-                                    led_red.set_low();
-                                    led_green.set_low();
-                                    led_blue.set_low();
-                                    led_yellow.set_low();
-                                    led_white.set_low();
-                                }
-                                Command::TimingStart => {
-                                    led_red.set_high();
-                                    led_green.set_high();
-                                    led_blue.set_high();
-                                    led_yellow.set_high();
-                                    led_white.set_high();
-                                    start_time = Instant::now();
-
-                                    break;
-                                }
-                                _ => {
-
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -372,13 +146,16 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(net_task(runner).unwrap());
 
-    spawner.spawn(button_and_leds_task(resources.buttons_and_leds).unwrap());
+    // Start buttons and leds tasks
+    spawner.spawn(buttons_task(resources.buttons).unwrap());
+    spawner.spawn(leds_task(resources.leds).unwrap());
 
     // And now we can use it!
 
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
     // let mut buf = [0; 4096];
+    let mut send_button_state:[ButtonState;5] = [ButtonState::None;5];
 
     loop {
         let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
@@ -399,7 +176,7 @@ async fn main(spawner: Spawner) {
         };
 
         loop {
-            let mut send_button_state: Option<ButtonState> = None;
+
             {
                 // this block needed to drop
                 let got = embassy_futures::select::select(
@@ -412,38 +189,46 @@ async fn main(spawner: Spawner) {
                         info!("Received command: {}", command.as_str());
                         match command {
                             Command::Reset => {
-                                RESET_SIGNAL.signal(());
+                                trace!("BUTTON_EVENTS.send(ButtonEvent::Reset)");
+                                BUTTON_EVENTS.send(ButtonEvent::Reset).await;
                             }
-                            Command::TimingIdle => {
-                                // set up for fastest reaction:
+                            Command::PollButtonState => {
+                                server_client
+                                    .send_message(Command::Buttons(send_button_state.clone()))
+                                    .await;
                             }
-                            Command::TimingStart => {
-                                //
-                            }
-                            Command::Buttons(_) | Command::TimingResult(_, _) => {} // Respoinses
+                            _ => {}
                         }
                     }
-                    Either::First(Err(_)) => {
+                    Either::First(Err(e)) => {
                         // socket closed
                         break;
                     }
                     Either::Second(button_state) => {
-                        send_button_state = Some(button_state);
+                        match button_state {
+                            Command::Buttons(button_state) => {
+
+                                send_button_state = button_state;
+                                trace!("New send button state: {:?}", send_button_state.iter().map(|state| match state{
+                                    ButtonState::Red => BUTTON_STATE_STRINGS[0],
+                                    ButtonState::Green => BUTTON_STATE_STRINGS[1],
+                                    ButtonState::Blue => BUTTON_STATE_STRINGS[2],
+                                    ButtonState::Yellow => BUTTON_STATE_STRINGS[3],
+                                    ButtonState::White => BUTTON_STATE_STRINGS[4],
+                                    ButtonState::None => BUTTON_STATE_STRINGS[5],
+                                }).collect::<Vec<&str,5>>());
+                            }
+                            _ => {}
+                        }
                         STATE_REPORT.reset();
                     }
                 }
             }
-            match send_button_state {
-                Some(button_state) => {
-                    server_client
-                        .send_message(Command::Buttons(button_state))
-                        .await;
-                }
-                None => {}
-            }
         }
     }
 }
+
+
 
 #[derive(Debug)]
 enum ClientError {
@@ -467,6 +252,7 @@ struct ServerClient<'a> {
 
 impl<'a> ServerClient<'a> {
     async fn read_message(&mut self) -> Result<Command, ClientError> {
+        self.data.clear();
         loop {
             let n = match self.socket.read(&mut self.buf).await {
                 Ok(0) => {
