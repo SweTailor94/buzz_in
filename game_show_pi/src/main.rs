@@ -24,6 +24,7 @@ struct AppState {
     pub button: Button,
     pub button_order: [Button; 5],
     pub answer_index: usize,
+    pub play_button_sound: bool,
     pub armed: bool,
     pub do_reset: bool,
 }
@@ -34,6 +35,7 @@ impl Default for AppState {
             button: Button::None,
             button_order: [Button::None; 5],
             answer_index: 0,
+            play_button_sound: false,
             armed: true,
             do_reset: false,
         }
@@ -172,6 +174,9 @@ impl MyApp {
         if state.answer_index < state.button_order.len() - 1 {
             state.answer_index += 1;
             state.button = state.button_order[state.answer_index];
+            if state.button != Button::None {
+                state.play_button_sound = true;
+            }
         } else {
             state.answer_index = state.button_order.len();
             state.button = Button::None;
@@ -260,7 +265,18 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Get button state
         let (current_button, button_order) = {
-            let s = self.app_state.lock().unwrap();
+            let mut s = self.app_state.lock().unwrap();
+            if s.play_button_sound {
+                s.play_button_sound = false;
+                self.audio_player.as_mut().unwrap().play_one_shot_sound(match s.button {
+                    Button::Red => "sound1.wav",
+                    Button::Blue => "sound2.wav",
+                    Button::Green => "sound3.wav",
+                    Button::Yellow => "sound4.wav",
+                    Button::White => "sound5.wav",
+                    _ => "",
+                });
+            }
             (s.button, s.button_order)
         };
         if current_button != Button::None {
@@ -462,30 +478,27 @@ impl eframe::App for MyApp {
                     let button_width = available_width / 3.0 - 100.0;
                     ui.add_space((available_width - button_width * 3.0 - 20.0) / 2.0);
                     if current_button != Button::None {
-                        // OK Button (Green checkmark)
-                        let ok_button = ui.add_sized(
+                        // Correct Button (Green checkmark)
+                        let correct_button = ui.add_sized(
                             [button_width, button_height],
                             egui::Button::new("").fill(egui::Color32::from_rgb(0, 180, 0)),
                         );
 
-                        if ok_button.clicked() {
+                        if correct_button.clicked() {
                             // Increment points for the current button
                             for (i, (_, _, b)) in colors.iter().enumerate() {
                                 if *b == current_button {
-                                    self.points[i] += if self.game_state == GameState::ZoomStopped {
-                                        self.zoom as i32
-                                    } else {
-                                        1
-                                    };
+                                    self.points[i] += 1;
                                     self.zoom = self.min_zoom;
                                 }
                             }
                             if let Some(audio_player) = self.audio_player.as_mut() {
                                 audio_player.stop_managed_sound();
+                                audio_player.play_one_shot_sound("Correct.mp3");
                                 let sound_file = self
                                     .current_question_correct_sound
                                     .as_deref()
-                                    .unwrap_or("correct.wav");
+                                    .unwrap_or("");
                                 audio_player.play_managed_sound(sound_file);
                             }
                             self.question_sound_paused_for_buzz = false;
@@ -504,7 +517,7 @@ impl eframe::App for MyApp {
                         }
 
                         // Draw checkmark on OK button
-                        let ok_rect = ok_button.rect;
+                        let ok_rect = correct_button.rect;
                         let painter = ui.painter();
                         let center = ok_rect.center();
                         let size = ok_rect.height() * 0.4;
@@ -555,7 +568,7 @@ impl eframe::App for MyApp {
                     }
 
                     if current_button != Button::None {
-                        // NOT OK Button (Red cross)
+                        // Wrong answer Button (Red cross)
                         ui.add_space(10.0);
                         let not_ok_button = ui.add_sized(
                             [button_width, button_height],
@@ -569,6 +582,7 @@ impl eframe::App for MyApp {
                                     self.game_state = GameState::ZoomingImage;
                                 };
                                 if let Some(audio_player) = self.audio_player.as_ref() {
+                                    audio_player.play_one_shot_sound("Wrong.mp3");
                                     audio_player.resume_managed_sound();
                                 }
                                 self.question_sound_paused_for_buzz = false;
@@ -758,6 +772,7 @@ async fn reset(state: Arc<Mutex<AppState>>) -> Result<impl warp::Reply, warp::Re
     state.button = Button::None;
     state.button_order = [Button::None; 5];
     state.answer_index = 0;
+    state.play_button_sound = false;
     state.armed = true;
     state.do_reset = true;
     let response = serde_json::json!({
@@ -796,7 +811,7 @@ async fn run_api_server(state: Arc<Mutex<AppState>>) {
 
 fn load_logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
     // Load the logo image from file
-    let img = image::open("knowit_logo.png").expect("Failed to load knowit_logo.png");
+    let img = image::open("logo.png").expect("Failed to load logo.png");
 
     let size = [img.width() as usize, img.height() as usize];
     let mut img_buffer = img.to_rgba8();

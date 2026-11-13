@@ -166,11 +166,14 @@ fn update_button_state(
         if app_state.button == button_pressed && app_state.button_order == button_order {
             false
         } else {
+            if app_state.button != button_pressed {
+                app_state.play_button_sound = true;
+            }
             app_state.button_order = button_order;
             app_state.button = button_pressed;
             true
         }
-    };
+    }; 
 
     if should_repaint {
         let repaint_signal = repaint_signal_clone.lock().unwrap();
